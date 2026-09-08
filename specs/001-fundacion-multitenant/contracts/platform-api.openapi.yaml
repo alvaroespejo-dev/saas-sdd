@@ -1,0 +1,700 @@
+openapi: 3.0.3
+info:
+  title: AEspejo ERP SaaS — Platform Core API
+  version: 1.0.0
+  description: >
+    Multi-tenant Foundation API: tenant management, authentication, RBAC, plans, and
+    module activation. See contracts/README.md for error conventions and isolation rule
+    (resources from another tenant return 404, never 403).
+
+servers:
+  - url: /api/v1
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Auth
+  - name: Tenants (platform)
+  - name: Users
+  - name: Roles
+  - name: Modules
+
+paths:
+  # ---------------------------------------------------------------- Auth
+  /auth/login:
+    post:
+      tags: [Auth]
+      security: []
+      summary: Authenticate user and issue tokens (FR-003)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tenantSlug, email, password]
+              properties:
+                tenantSlug: { type: string, example: clinica-norte }
+                email: { type: string, format: email }
+                password: { type: string, format: password }
+      responses:
+        '200':
+          description: Authentication successful
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenResponse' }
+        '401':
+          description: >
+            Invalid credentials. The message does NOT distinguish between non-existent user and
+            incorrect password (User Story 2, scenario 2).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /auth/platform/login:
+    post:
+      tags: [Auth]
+      security: []
+      summary: Authenticate a platform operator (FR-017)
+      description: >
+        Login of the global platform identity. Does NOT receive `tenantSlug` because the
+        operator does not belong to any tenant. The issued token carries a platform claim and
+        **no** `tenant_id`, and is rejected by tenant-owned data endpoints (FR-018).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string, format: password }
+      responses:
+        '200':
+          description: Authentication successful
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenResponse' }
+        '401':
+          description: Invalid credentials, not distinguishing user from password
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      security: []
+      summary: Renew access token with a valid refresh token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refreshToken]
+              properties:
+                refreshToken: { type: string }
+      responses:
+        '200':
+          description: Tokens renewed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenResponse' }
+        '401':
+          description: Refresh token invalid, expired, or revoked (FR-016)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Revoke the refresh token of the current session
+      responses:
+        '204': { description: Session closed }
+
+  /auth/forgot-password:
+    post:
+      tags: [Auth]
+      security: []
+      summary: Initiate password recovery (FR-015)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tenantSlug, email]
+              properties:
+                tenantSlug: { type: string }
+                email: { type: string, format: email }
+      responses:
+        '202':
+          description: >
+            Response is ALWAYS 202, whether or not the account exists, to prevent
+            user enumeration (FR-015).
+
+  /auth/reset-password:
+    post:
+      tags: [Auth]
+      security: []
+      summary: Redeem the recovery link and set a new password (FR-015)
+      description: >
+        The `token` received by email identifies the tenant and user; neither `tenantSlug` is
+        accepted nor needed. A successful redemption revokes all existing sessions of the
+        user (FR-016), just like any other credential change.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, newPassword]
+              properties:
+                token: { type: string }
+                newPassword: { type: string, format: password }
+      responses:
+        '204': { description: Password updated }
+        '400':
+          description: >
+            `PASSWORD_RESET_TOKEN_INVALID` — unknown, expired, or already used link; or
+            `PASSWORD_TOO_WEAK` — does not comply with the tenant's password policy (FR-023).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /auth/me:
+    get:
+      tags: [Auth]
+      summary: Authenticated user profile, their roles and enabled modules
+      responses:
+        '200':
+          description: Session context
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  userId: { type: string, format: uuid }
+                  email: { type: string }
+                  fullName: { type: string }
+                  tenant:
+                    type: object
+                    properties:
+                      id: { type: string, format: uuid }
+                      name: { type: string }
+                      slug: { type: string }
+                      status: { $ref: '#/components/schemas/TenantStatus' }
+                  preferredLanguage:
+                    allOf: [{ $ref: '#/components/schemas/LanguageCode' }]
+                    nullable: true
+                  effectiveLanguage:
+                    allOf: [{ $ref: '#/components/schemas/LanguageCode' }]
+                    description: >
+                      Language to apply: the user's if they chose one, otherwise the tenant's
+                      (FR-021). The client does not need to resolve the precedence.
+                  roles:
+                    type: array
+                    items: { type: string }
+                  enabledModules:
+                    type: array
+                    items: { type: string, example: invoicing }
+
+  /users/me/language:
+    put:
+      tags: [Users]
+      summary: Change the authenticated user's preferred language (FR-021)
+      description: >
+        Persists the language selector choice on the account, so it applies
+        when logging in from any device. Send `null` to restore inheritance
+        from the tenant's default language.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [preferredLanguage]
+              properties:
+                preferredLanguage:
+                  allOf: [{ $ref: '#/components/schemas/LanguageCode' }]
+                  nullable: true
+      responses:
+        '204': { description: Language updated }
+        '400':
+          description: Unsupported language
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  # ---------------------------------------------- Tenants (platform operator)
+  /platform/plans:
+    get:
+      tags: [Tenants (platform)]
+      summary: Catalog of available plans (FR-009)
+      description: >
+        Feeds the plan selector in tenant signup. Only returns active plans; a
+        retired plan is also not accepted during provisioning, hiding it here is not enough
+        (Principle V).
+      responses:
+        '200':
+          description: Available plans
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Plan' }
+
+  /platform/tenants:
+    post:
+      tags: [Tenants (platform)]
+      summary: Tenant signup with its first administrator (FR-001)
+      description: >
+        Platform operator endpoint (global identity, FR-017), outside the scope of
+        a tenant. Requires a platform token; a tenant user token receives
+        `403 FORBIDDEN_SCOPE` (FR-018). Cross-tenant audited operation (Principle I).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, slug, planId, adminEmail, adminFullName]
+              properties:
+                name: { type: string, maxLength: 200 }
+                slug:
+                  type: string
+                  maxLength: 63
+                  pattern: '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$'
+                planId: { type: string, format: uuid }
+                adminEmail: { type: string, format: email }
+                adminFullName: { type: string }
+                defaultLanguage:
+                  allOf: [{ $ref: '#/components/schemas/LanguageCode' }]
+                  nullable: true
+                adminPassword:
+                  type: string
+                  format: password
+                  nullable: true
+                  description: >
+                    If omitted, a random unusable password is generated and the
+                    administrator must use password recovery (FR-015).
+                passwordMinLength:
+                  type: integer
+                  nullable: true
+                  description: Minimum length that this tenant will require (FR-023). Default 12.
+                passwordRequireComplexity:
+                  type: boolean
+                  nullable: true
+                  description: Require uppercase, lowercase, digit, and symbol. Default false.
+      responses:
+        '201':
+          description: Tenant created in Active state with its administrator
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Tenant' }
+        '409':
+          description: '`SLUG_ALREADY_IN_USE` — identifier already in use (FR-002)'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /platform/tenants/{tenantId}/password-policy:
+    put:
+      tags: [Tenants (platform)]
+      summary: Configure the tenant's password policy (FR-023)
+      parameters:
+        - { name: tenantId, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [minLength, requireComplexity]
+              properties:
+                minLength: { type: integer, example: 12 }
+                requireComplexity: { type: boolean }
+      responses:
+        '200':
+          description: Policy updated; applies at the next password change
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Tenant' }
+
+  /platform/tenants/{tenantId}/plan:
+    put:
+      tags: [Tenants (platform)]
+      summary: Change the tenant's plan and recalculate enabled modules (FR-012)
+      parameters:
+        - { name: tenantId, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [planId]
+              properties:
+                planId: { type: string, format: uuid }
+      responses:
+        '200':
+          description: >
+            Plan updated. Enabled modules are reflected in < 1 s (SC-004).
+            Data from modules that leave the plan are preserved in read-only (FR-012a).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Tenant' }
+
+  /platform/tenants/{tenantId}/status:
+    put:
+      tags: [Tenants (platform)]
+      summary: Suspend or reactivate a tenant (FR-014)
+      parameters:
+        - { name: tenantId, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { $ref: '#/components/schemas/TenantStatus' }
+      responses:
+        '200':
+          description: Status updated and audited (FR-013)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Tenant' }
+
+  # ---------------------------------------------------------- Users (tenant)
+  /users:
+    get:
+      tags: [Users]
+      summary: List users of the authenticated tenant (FR-007)
+      description: Returns exclusively users of the tenant in session (FR-005).
+      parameters:
+        - { name: page, in: query, schema: { type: integer, default: 1 } }
+        - { name: pageSize, in: query, schema: { type: integer, default: 25, maximum: 100 } }
+      responses:
+        '200':
+          description: Page of users
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/User' }
+                  total: { type: integer }
+    post:
+      tags: [Users]
+      summary: Create/invite user within the tenant (FR-007)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, fullName, roleIds]
+              properties:
+                email: { type: string, format: email }
+                fullName: { type: string }
+                roleIds:
+                  type: array
+                  items: { type: string, format: uuid }
+      responses:
+        '201':
+          description: User created in the tenant in session
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '403':
+          description: '`FORBIDDEN_ROLE` — requires Administrator role'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /users/{userId}:
+    parameters:
+      - { name: userId, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      tags: [Users]
+      summary: Get a user from the tenant
+      responses:
+        '200':
+          description: User
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '404':
+          description: >
+            `NOT_FOUND` — does not exist **or belongs to another tenant**. Both cases are
+            indistinguishable by design (FR-005, User Story 2, scenario 1).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    put:
+      tags: [Users]
+      summary: Update user data or status
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                fullName: { type: string }
+                status: { $ref: '#/components/schemas/UserStatus' }
+      responses:
+        '200':
+          description: User updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '409':
+          description: '`LAST_ADMIN` — would leave the tenant without an active Administrator (FR-008)'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /users/{userId}/roles:
+    put:
+      tags: [Users]
+      summary: Assign/revoke roles from a tenant user (FR-007)
+      description: >
+        When modifying roles, the user's refresh tokens are revoked and the change takes
+        effect at the latest when their current access token expires (FR-016, D-003).
+      parameters:
+        - { name: userId, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [roleIds]
+              properties:
+                roleIds:
+                  type: array
+                  items: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Roles updated and audited (FR-013)
+        '409':
+          description: '`LAST_ADMIN` — would remove the last active Administrator (FR-008)'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  # ------------------------------------------------------------- Roles (tenant)
+  /roles:
+    get:
+      tags: [Roles]
+      summary: List tenant roles
+      responses:
+        '200':
+          description: Tenant roles
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Role' }
+    post:
+      tags: [Roles]
+      summary: Create role with its permissions (FR-006)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, permissions]
+              properties:
+                name: { type: string }
+                permissions:
+                  type: array
+                  items: { type: string, example: invoicing.factura.crear }
+      responses:
+        '201':
+          description: Role created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Role' }
+
+  /roles/{roleId}/permissions:
+    put:
+      tags: [Roles]
+      summary: Replace a role's permissions (FR-006)
+      description: >
+        System roles (`isSystem: true`) are not modifiable: emptying Administrator's permissions
+        would be a backdoor to the last administrator invariant (FR-008).
+      parameters:
+        - { name: roleId, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, permissions]
+              properties:
+                name: { type: string }
+                permissions:
+                  type: array
+                  items: { type: string }
+      responses:
+        '204': { description: Permissions updated }
+        '403':
+          description: '`FORBIDDEN_ROLE` — system role or insufficient permission'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /roles/permissions:
+    get:
+      tags: [Roles]
+      summary: Catalog of permissions exposed by Platform Core
+      description: >
+        Each business module (specs 002-007) declares its own with the same form
+        `module.entity.action`, so a tenant composes roles across modules.
+      responses:
+        '200':
+          description: Available permission codes
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: string, example: platform.users.write }
+
+  # ----------------------------------------------------------------- Modules
+  /modules:
+    get:
+      tags: [Modules]
+      summary: Modules enabled for the authenticated tenant (FR-010)
+      responses:
+        '200':
+          description: >
+            Effective status per module. `isEnabled=false` with existing data implies
+            read-only access (FR-012a).
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/TenantModule' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    LanguageCode:
+      type: string
+      description: >
+        Language supported by the application (FR-019). `es` is the default language.
+      enum: [es, en, fr]
+
+    TenantStatus:
+      type: string
+      enum: [Active, Suspended]
+
+    UserStatus:
+      type: string
+      enum: [Active, Disabled]
+
+    TokenResponse:
+      type: object
+      properties:
+        accessToken: { type: string }
+        expiresIn: { type: integer, example: 900, description: Seconds (~15 min, D-003) }
+        refreshToken: { type: string }
+
+    Tenant:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        slug: { type: string }
+        status: { $ref: '#/components/schemas/TenantStatus' }
+        planId: { type: string, format: uuid }
+        defaultLanguage: { $ref: '#/components/schemas/LanguageCode' }
+        createdAt: { type: string, format: date-time }
+        passwordMinLength: { type: integer, example: 12 }
+        passwordRequireComplexity: { type: boolean }
+
+    User:
+      type: object
+      description: Does not expose `tenantId`; the tenant is always derived from the session (FR-004).
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        fullName: { type: string }
+        status: { $ref: '#/components/schemas/UserStatus' }
+        preferredLanguage:
+          allOf: [{ $ref: '#/components/schemas/LanguageCode' }]
+          nullable: true
+          description: '`null` ⇒ inherits the tenant''s default language (FR-021)'
+        roles:
+          type: array
+          items: { $ref: '#/components/schemas/Role' }
+
+    Plan:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, example: Basic }
+        moduleNameKeys:
+          type: array
+          description: >
+            i18n keys of the modules included in the plan, not literal text (Principle VIII).
+          items: { type: string, example: modules.invoicing.name }
+
+    Role:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        isSystem: { type: boolean }
+        permissions:
+          type: array
+          items: { type: string }
+
+    TenantModule:
+      type: object
+      properties:
+        code: { type: string, example: invoicing }
+        nameKey:
+          type: string
+          example: modules.invoicing.name
+          description: >
+            i18n key, not literal text: the visible name is resolved on the client
+            according to the user's language (Principle VIII, i18n es/en).
+        isEnabled: { type: boolean }
+
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          enum:
+            - UNAUTHENTICATED
+            - FORBIDDEN_ROLE
+            - FORBIDDEN_SCOPE
+            - MODULE_NOT_IN_PLAN
+            - TENANT_SUSPENDED
+            - NOT_FOUND
+            - SLUG_ALREADY_IN_USE
+            - LAST_ADMIN
+            - PASSWORD_TOO_WEAK
+            - PASSWORD_RESET_TOKEN_INVALID
+        message: { type: string }
+        traceId: { type: string }

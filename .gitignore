@@ -1,0 +1,36 @@
+# --- Claude Code local state ---
+.claude/settings.local.json
+
+# --- .NET ---
+bin/
+obj/
+*.user
+*.suo
+.vs/
+appsettings.*.local.json
+*.dbmdl
+
+# --- Node / Angular / React ---
+node_modules/
+dist/
+.angular/
+.next/
+.turbo/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# --- Env / secrets ---
+.env
+.env.*
+!.env.example
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+
+# --- EF / SQL local ---
+*.mdf
+*.ldf
